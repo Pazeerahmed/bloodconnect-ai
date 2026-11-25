@@ -1,0 +1,10 @@
+name = "bloodconnect-ai-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-25"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+FRONTEND_URL = "http://localhost:5173"
+
+[ai]
+binding = "AI"

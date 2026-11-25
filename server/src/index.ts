@@ -1,3 +1,4 @@
+import { connect } from 'cloudflare:sockets';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
@@ -17,7 +18,7 @@ async function db(c:any) {
   if(!uri) throw Error('MongoDB is not configured');
   let client:MongoClient|undefined=c.get('mongoClient');
   if(!client){
-    client=new MongoClient(uri,{serverSelectionTimeoutMS:30000,connectTimeoutMS:10000,maxPoolSize:1,minPoolSize:0,serverMonitoringMode:'poll',autoSelectFamily:false});
+    client=new MongoClient(uri,{tls:true,serverSelectionTimeoutMS:30000});
     c.set('mongoClient',client);
     try { await client.connect(); }
     catch(e:any){
@@ -42,6 +43,22 @@ const auth=async(c:any,next:()=>Promise<void>)=>{const h=c.req.header('Authoriza
 app.use('*',cors({origin:(o,c)=>['http://localhost:5173',c.env.FRONTEND_URL].includes(o)?o:'',allowHeaders:['Content-Type','Authorization'],allowMethods:['GET','POST','PUT','DELETE','OPTIONS']}));
 app.use('/api/*',async(c,next)=>{const o=c.req.header('Origin');if(o&&o!=='http://localhost:5173'&&o!==c.env.FRONTEND_URL)return c.json({error:'Origin not allowed'},403);await next()});
 app.get('/',c=>c.json({service:'BloodConnect AI',status:'ok'}));
+app.get('/api/network-check',async c=>{
+  const host='ac-vfx5wio-shard-00-00.0ihxb8d.mongodb.net';
+  let socket:ReturnType<typeof connect>|undefined;
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+    socket=connect({hostname:host,port:27017},{secureTransport:'on'});
+    await Promise.race([socket.opened,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('timeout')),8000)})]);
+    return c.json({tls:'ok'});
+  } catch(e) {
+    console.error('Atlas direct TLS probe:',e instanceof Error?e.name:'unknown');
+    return c.json({tls:'failed'},503);
+  } finally {
+    if(timer!==undefined)clearTimeout(timer);
+    if(socket)c.executionCtx.waitUntil(socket.close().catch(()=>{}));
+  }
+});
 app.get('/api/health',c=>c.json({status:'ok'}));
 app.post('/api/auth/signup',async c=>{const p=signup.safeParse(await body(c));if(!p.success)return c.json({error:error(p)},400);const users=(await db(c)).collection('users');if(await users.findOne({email:p.data.email}))return c.json({error:'Email already exists'},409);try{const result=await users.insertOne({name:p.data.name,email:p.data.email,passwordHash:await bcrypt.hash(p.data.password,10),createdAt:new Date()});return c.json({id:String(result.insertedId),message:'Account created'},201)}catch(e:any){if(e.code===11000)return c.json({error:'Email already exists'},409);throw e}});
 app.post('/api/auth/login',async c=>{const p=z.object({email:z.string().trim().email().transform(s=>s.toLowerCase()),password:z.string().min(1)}).safeParse(await body(c));if(!p.success)return c.json({error:error(p)},400);const u=await(await db(c)).collection('users').findOne({email:p.data.email});if(!u||!await bcrypt.compare(p.data.password,u.passwordHash))return c.json({error:'Invalid email or password'},401);const token=await new SignJWT({}).setProtectedHeader({alg:'HS256'}).setSubject(String(u._id)).setIssuedAt().setExpirationTime('7d').sign(key(c));return c.json({token,user:cleanUser(u)})});

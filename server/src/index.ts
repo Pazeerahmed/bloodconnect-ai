@@ -5,15 +5,33 @@ import { MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
 import { SignJWT, jwtVerify } from 'jose';
 
-type Env = { Bindings: { MONGODB_URI:string; JWT_SECRET:string; FRONTEND_URL?:string; AI:{run:(model:string,input:unknown)=>Promise<any>} }; Variables: {userId:string} };
+type Env = { Bindings: { MONGODB_URI:string; JWT_SECRET:string; FRONTEND_URL?:string; AI:{run:(model:string,input:unknown)=>Promise<any>} }; Variables: {userId:string; mongoClient?:MongoClient} };
 const app = new Hono<Env>();
 const groups = z.enum(['A+','A-','B+','B-','AB+','AB-','O+','O-']);
 const phone = z.string().trim().regex(/^\+?[0-9 -]{8,18}$/, 'Invalid phone number');
 const signup = z.object({name:z.string().trim().min(2).max(100),email:z.string().trim().email().transform(x=>x.toLowerCase()),password:z.string().min(8).max(72)});
 const donor = z.object({bloodGroup:groups,city:z.string().trim().min(2).max(80),phone,available:z.boolean(),contactConsent:z.boolean()});
 const request = z.object({bloodGroup:groups,city:z.string().trim().min(2).max(80),hospital:z.string().trim().min(2).max(130),units:z.number().int().min(1).max(20),urgency:z.enum(['normal','urgent']),details:z.string().max(500).default(''),contactPhone:phone,status:z.enum(['open','fulfilled']).default('open')});
-let cache: {uri:string; client:MongoClient}|undefined;
-async function db(c:any) {const uri=c.env.MONGODB_URI;if(!uri)throw Error('MongoDB is not configured');if(!cache||cache.uri!==uri){const client=new MongoClient(uri,{serverSelectionTimeoutMS:7000,maxPoolSize:2});await client.connect();cache={uri,client};}return cache.client.db('bloodconnect');}
+async function db(c:any) {
+  const uri=c.env.MONGODB_URI?.trim();
+  if(!uri) throw Error('MongoDB is not configured');
+  let client:MongoClient|undefined=c.get('mongoClient');
+  if(!client){
+    client=new MongoClient(uri,{serverSelectionTimeoutMS:30000,connectTimeoutMS:10000,maxPoolSize:1,minPoolSize:0,serverMonitoringMode:'poll',autoSelectFamily:false});
+    c.set('mongoClient',client);
+    try { await client.connect(); }
+    catch(e:any){
+      const servers=e?.reason?.servers;
+      if(servers instanceof Map) console.error('MongoDB server diagnostics:',Array.from(servers.values(),(s:any)=>({type:s.type,error:s.error?.name,code:s.error?.code,causeCode:s.error?.cause?.code})));
+      throw e;
+    }
+  }
+  return client.db('bloodconnect');
+}
+app.use('*',async(c,next)=>{
+  try { await next(); }
+  finally { const client=c.get('mongoClient');if(client) await client.close().catch(()=>{}); }
+});
 const key=(c:any)=>{if(!c.env.JWT_SECRET||c.env.JWT_SECRET.length<32)throw Error('JWT secret is not configured');return new TextEncoder().encode(c.env.JWT_SECRET);};
 const error=(p:any)=>p.error.issues.map((i:any)=>i.path.join('.')+': '+i.message).join('; ');
 const body=async(c:any)=>{try{return await c.req.json()}catch{return null}};
